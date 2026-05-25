@@ -25,8 +25,15 @@ Then open http://localhost:3000.
 
 1. Push this repo to GitHub (public is fine — secrets live only in `.env.local` which is gitignored).
 2. On Vercel: New Project → Import → select the repo.
-3. Environment Variables → add `ANTHROPIC_API_KEY` for Production and Preview.
+3. Environment Variables → add the following for Production and Preview:
+   - `ANTHROPIC_API_KEY`
+   - `BASIC_AUTH_USER`
+   - `BASIC_AUTH_PASSWORD`
 4. Deploy.
+
+## Auth
+
+Deployed instances are gated by HTTP Basic Auth via `middleware.ts`. Credentials come from `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`. If either is missing on a Vercel deployment, every request returns 503 (fail-closed). Local dev (`npm run dev` with no `VERCEL` env var) skips auth.
 
 ## Input format
 
