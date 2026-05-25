@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Trade Analyzer
 
-## Getting Started
+Single-account MT4 ledger analyzer. Paste a trade export, get back:
 
-First, run the development server:
+- Account summary (P&L, win rate, profit factor, expectancy, drawdown).
+- Symbol / hour / day-of-week / hold-time breakdowns.
+- Anomaly detectors for **possible platform exploits** (dealer fills, rapid-profit scalps, hedge games, weekend fills, outsized positions, stop-out cascades).
+- Anomaly detectors for **trading-style patterns** (martingale escalation, holding losers, post-entry SL mods).
+- Optional Claude analysis that takes the flagged subset + account aggregates and writes a short report.
+
+Trade data is parsed in the browser. The AI route sends only the detector findings and aggregate stats — never the full ledger.
+
+## Local dev
 
 ```bash
+cp .env.example .env.local
+# fill in ANTHROPIC_API_KEY in .env.local
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deploy to Vercel
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Push this repo to GitHub (public is fine — secrets live only in `.env.local` which is gitignored).
+2. On Vercel: New Project → Import → select the repo.
+3. Environment Variables → add `ANTHROPIC_API_KEY` for Production and Preview.
+4. Deploy.
 
-## Learn More
+## Input format
 
-To learn more about Next.js, take a look at the following resources:
+Tab- or comma-separated, with or without header. Expected columns (MT4 export order):
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+#  OpenTime  OpenPrice  CloseTime  ClosePrice  Reason  Comment  Symbol  Side  Volume  Sl  Tp  Swaps  Profit  Total
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Non-trade rows (footer totals, blank lines) are skipped automatically.
 
-## Deploy on Vercel
+## Filters
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Include dealer trades** — OFF by default. Toggle on to surface dealer-routed fills (the "Benefit Trade" pattern).
+- **Include pending / cancelled** — OFF by default. Toggle on to include `BuyStop` / `SellStop` and rows with `cancelled` / `deleted` comments.
+- **Symbol** — narrow to one symbol.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Account metadata
+
+Label, MT4 number, and CRM link are stored in browser localStorage and sent to the AI route as context (so the report can refer to "account 77123456" instead of an anonymous account). No server-side persistence yet.
+
+## What it does NOT do
+
+- No market-data comparison (yet) — exploit detection is purely from the ledger.
+- No multi-account workspace — one ledger at a time.
+- No write-back to MT4 or CRM.
