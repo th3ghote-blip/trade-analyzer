@@ -29,7 +29,19 @@ Then open http://localhost:3000.
    - `ANTHROPIC_API_KEY`
    - `BASIC_AUTH_USER`
    - `BASIC_AUTH_PASSWORD`
+   - `SUPABASE_URL` (optional — enables saved accounts)
+   - `SUPABASE_SERVICE_ROLE_KEY` (optional — server-side only, **never** put this in client code)
 4. Deploy.
+
+## Supabase setup (saved accounts)
+
+1. Create a new Supabase project: https://supabase.com/dashboard/new
+2. Project Settings → API → copy the **Project URL** and the **service_role** secret.
+3. Add them to Vercel as `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+4. SQL Editor → New query → paste the contents of `migrations/001_accounts.sql` → Run.
+5. Redeploy. The Saved Accounts panel should now list rows from the `public.accounts` table.
+
+The service role key bypasses RLS. The `accounts` table has a deny-all RLS policy so the anon key can never read it — only server-side API routes (gated by basic-auth) reach the data.
 
 ## Auth
 

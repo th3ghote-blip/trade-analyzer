@@ -31,6 +31,7 @@ import { detectAll } from "@/lib/detectors";
 import { fmtDate, fmtHold, fmtMoney, fmtNum, fmtPct } from "@/lib/format";
 import { buildChatContext } from "@/lib/contextBundle";
 import type { AccountMeta, Anomaly, Trade } from "@/lib/types";
+import AccountPicker from "./AccountPicker";
 
 const META_KEY = "trade-analyzer.account-meta";
 const CSV_KEY = "trade-analyzer.last-csv";
@@ -110,6 +111,13 @@ export default function TradeAnalyzer() {
     cacheCreated: number;
   } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // --- Saved-account state ---
+  const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
+  const [savedSnapshot, setSavedSnapshot] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [accountsRefreshKey, setAccountsRefreshKey] = useState(0);
 
   // Load persisted meta + csv
   useEffect(() => {
@@ -266,6 +274,125 @@ export default function TradeAnalyzer() {
     }
   }
 
+  // ---------- Saved-account handlers ----------
+
+  function snapshot(meta: AccountMeta, csv: string, history: ChatTurn[]): string {
+    return JSON.stringify({ meta, csv, history });
+  }
+
+  const currentSnapshot = snapshot(meta, rawCsv, chatHistory);
+  const isDirty =
+    currentAccountId !== null && savedSnapshot !== "" && currentSnapshot !== savedSnapshot;
+  const canSave =
+    rawCsv.trim().length > 0 &&
+    trades.length > 0 &&
+    (meta.label.trim().length > 0 || meta.mt4Number.trim().length > 0);
+
+  async function loadAccount(id: string) {
+    setSaveError(null);
+    try {
+      const resp = await fetch(`/api/accounts/${id}`);
+      const data = await resp.json();
+      if (!resp.ok) {
+        setSaveError(data.error ?? `HTTP ${resp.status}`);
+        return;
+      }
+      const a = data.account;
+      const nextMeta: AccountMeta = {
+        label: a.label ?? "",
+        mt4Number: a.mt4_number ?? "",
+        crmLink: a.crm_link ?? "",
+      };
+      const nextHistory = Array.isArray(a.chat_history) ? a.chat_history : [];
+      setMeta(nextMeta);
+      setRawCsv(a.csv_data ?? "");
+      const res = parseTradesCsv(a.csv_data ?? "");
+      setTrades(res.trades);
+      setParseInfo({ skipped: res.skipped, errors: res.errors });
+      setChatHistory(nextHistory);
+      setChatError(null);
+      setChatUsage(null);
+      setAiState({ loading: false, text: null, error: null });
+      setCurrentAccountId(a.id);
+      setSavedSnapshot(snapshot(nextMeta, a.csv_data ?? "", nextHistory));
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function saveAccount() {
+    if (!canSave) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const payload = {
+        id: currentAccountId ?? undefined,
+        label: meta.label.trim() || meta.mt4Number.trim() || "Untitled",
+        mt4Number: meta.mt4Number,
+        crmLink: meta.crmLink,
+        csvData: rawCsv,
+        chatHistory,
+        tradeCount: trades.length,
+        netPnl: summary.netPnl,
+        dateFrom: summary.dateFrom?.toISOString() ?? null,
+        dateTo: summary.dateTo?.toISOString() ?? null,
+      };
+      const resp = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setSaveError(data.error ?? `HTTP ${resp.status}`);
+        return;
+      }
+      setCurrentAccountId(data.account.id);
+      setSavedSnapshot(currentSnapshot);
+      setAccountsRefreshKey((k) => k + 1);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteAccount(id: string) {
+    setSaveError(null);
+    try {
+      const resp = await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setSaveError(data.error ?? `HTTP ${resp.status}`);
+        return;
+      }
+      if (currentAccountId === id) {
+        setCurrentAccountId(null);
+        setSavedSnapshot("");
+      }
+      setAccountsRefreshKey((k) => k + 1);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function newAccount() {
+    setMeta({ label: "", mt4Number: "", crmLink: "" });
+    setRawCsv("");
+    setTrades([]);
+    setParseInfo(null);
+    setChatHistory([]);
+    setChatError(null);
+    setChatUsage(null);
+    setAiState({ loading: false, text: null, error: null });
+    setCurrentAccountId(null);
+    setSavedSnapshot("");
+    setSaveError(null);
+    try {
+      localStorage.removeItem(CSV_KEY);
+    } catch {}
+  }
+
   async function askQuestion(q: string) {
     const question = q.trim();
     if (!question || chatLoading) return;
@@ -308,6 +435,19 @@ export default function TradeAnalyzer() {
           Paste an MT4 trade ledger. Detects platform-exploit candidates and trading-style patterns.
         </p>
       </header>
+
+      <AccountPicker
+        currentId={currentAccountId}
+        currentDirty={isDirty}
+        canSave={canSave}
+        saving={saving}
+        saveError={saveError}
+        onLoad={loadAccount}
+        onSave={saveAccount}
+        onDelete={deleteAccount}
+        onNew={newAccount}
+        refreshKey={accountsRefreshKey}
+      />
 
       <section className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
         <Field

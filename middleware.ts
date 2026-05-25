@@ -51,7 +51,9 @@ export function middleware(req: NextRequest) {
         const user = decoded.slice(0, idx);
         const pass = decoded.slice(idx + 1);
         if (timingSafeEqual(user, expectedUser) && timingSafeEqual(pass, expectedPass)) {
-          const res = NextResponse.next();
+          const requestHeaders = new Headers(req.headers);
+          requestHeaders.set("x-auth-user", user);
+          const res = NextResponse.next({ request: { headers: requestHeaders } });
           res.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
           res.headers.set("X-Frame-Options", "DENY");
           res.headers.set("Referrer-Policy", "no-referrer");
