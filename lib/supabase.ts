@@ -33,6 +33,7 @@ export interface AccountRow {
   net_pnl: number | null;
   date_from: string | null;
   date_to: string | null;
+  ai_analysis: string | null;
   created_at: string;
   updated_at: string;
 }

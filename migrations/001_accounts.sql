@@ -11,6 +11,7 @@ create table if not exists public.accounts (
   crm_link text,
   csv_data text not null,
   chat_history jsonb not null default '[]'::jsonb,
+  ai_analysis text,
   trade_count integer not null default 0,
   net_pnl numeric,
   date_from timestamptz,

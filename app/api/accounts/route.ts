@@ -38,6 +38,7 @@ interface SaveBody {
   crmLink?: string;
   csvData: string;
   chatHistory?: Array<{ role: "user" | "assistant"; content: string }>;
+  aiAnalysis?: string | null;
   tradeCount?: number;
   netPnl?: number | null;
   dateFrom?: string | null;
@@ -69,6 +70,7 @@ export async function POST(req: NextRequest) {
     crm_link: body.crmLink?.trim() || null,
     csv_data: body.csvData,
     chat_history: body.chatHistory ?? [],
+    ai_analysis: body.aiAnalysis ?? null,
     trade_count: body.tradeCount ?? 0,
     net_pnl: body.netPnl ?? null,
     date_from: body.dateFrom ?? null,

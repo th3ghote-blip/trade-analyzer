@@ -276,11 +276,11 @@ export default function TradeAnalyzer() {
 
   // ---------- Saved-account handlers ----------
 
-  function snapshot(meta: AccountMeta, csv: string, history: ChatTurn[]): string {
-    return JSON.stringify({ meta, csv, history });
+  function snapshot(meta: AccountMeta, csv: string, history: ChatTurn[], aiText: string | null): string {
+    return JSON.stringify({ meta, csv, history, aiText });
   }
 
-  const currentSnapshot = snapshot(meta, rawCsv, chatHistory);
+  const currentSnapshot = snapshot(meta, rawCsv, chatHistory, aiState.text);
   const isDirty =
     currentAccountId !== null && savedSnapshot !== "" && currentSnapshot !== savedSnapshot;
   const canSave =
@@ -312,9 +312,10 @@ export default function TradeAnalyzer() {
       setChatHistory(nextHistory);
       setChatError(null);
       setChatUsage(null);
-      setAiState({ loading: false, text: null, error: null });
+      const nextAiText = a.ai_analysis ?? null;
+      setAiState({ loading: false, text: nextAiText, error: null });
       setCurrentAccountId(a.id);
-      setSavedSnapshot(snapshot(nextMeta, a.csv_data ?? "", nextHistory));
+      setSavedSnapshot(snapshot(nextMeta, a.csv_data ?? "", nextHistory, nextAiText));
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
     }
@@ -332,6 +333,7 @@ export default function TradeAnalyzer() {
         crmLink: meta.crmLink,
         csvData: rawCsv,
         chatHistory,
+        aiAnalysis: aiState.text,
         tradeCount: trades.length,
         netPnl: summary.netPnl,
         dateFrom: summary.dateFrom?.toISOString() ?? null,
