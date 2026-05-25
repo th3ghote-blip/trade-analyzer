@@ -317,13 +317,20 @@ export default function TradeAnalyzer() {
         y += 7;
       };
 
+      const lineH = (size: number) => size * 0.38; // mm per line at given pt size
+
       const line = (
         text: string,
         size = 9,
         color: [number, number, number] = [170, 170, 170],
       ) => {
-        const lines = pdf.splitTextToSize(text, cw) as string[];
-        const h = lines.length * (size * 0.45) + 2;
+        const safeText = text
+          .replace(/—|–/g, "-")   // em/en dash
+          .replace(/→/g, "->")          // arrow
+          .replace(/…/g, "...")         // ellipsis
+          .replace(/[^\x00-\x7F]/g, "?");   // any other non-ASCII
+        const lines = pdf.splitTextToSize(safeText, cw) as string[];
+        const h = lines.length * lineH(size) + 1.5;
         checkPage(h);
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(size);
@@ -383,7 +390,7 @@ export default function TradeAnalyzer() {
         ["Closed trades", fmtNum(summary.closedTrades)],
         ["Largest loss", fmtMoney(summary.largestLoss)],
         ["Largest win", fmtMoney(summary.largestWin)],
-        ["Date range", `${fmtDate(summary.dateFrom)} → ${fmtDate(summary.dateTo)}`],
+        ["Date range", `${fmtDate(summary.dateFrom)} to ${fmtDate(summary.dateTo)}`],
       ];
       const colW = cw / 2;
       for (let i = 0; i < stats.length; i += 2) {
@@ -441,10 +448,11 @@ export default function TradeAnalyzer() {
             : a.severity === "warn"
               ? [251, 191, 36]
               : [110, 110, 110];
-        line(`${a.severity === "high" ? "●" : a.severity === "warn" ? "◆" : "○"} #${a.ticket}  ${a.summary}`, 8, color);
+        const tag = a.severity === "high" ? "[HIGH]" : a.severity === "warn" ? "[WARN]" : "[info]";
+        line(`${tag} #${a.ticket}  ${a.summary}`, 8, color);
       }
       if (anomalies.length > 80) {
-        line(`… and ${anomalies.length - 80} more anomalies`, 8, [80, 80, 80]);
+        line(`... and ${anomalies.length - 80} more anomalies`, 8, [80, 80, 80]);
       }
       y += 4;
 
