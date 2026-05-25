@@ -515,7 +515,9 @@ export default function TradeAnalyzer() {
                   />
                   <YAxis stroke="#888" fontSize={11} tickFormatter={(v) => fmtMoney(v)} />
                   <Tooltip
-                    contentStyle={{ background: "#111", border: "1px solid #333" }}
+                    contentStyle={{ background: "#111", border: "1px solid #333", color: "#e5e5e5" }}
+                    labelStyle={{ color: "#a3a3a3" }}
+                    itemStyle={{ color: "#e5e5e5" }}
                     labelFormatter={(t) => new Date(Number(t)).toISOString().slice(0, 16)}
                     formatter={(v) => fmtMoney(Number(v))}
                   />
@@ -767,7 +769,10 @@ function BarBlock<T extends { trades: number; pnl: number }>({
           <XAxis dataKey={xKey as string} stroke="#888" fontSize={11} />
           <YAxis stroke="#888" fontSize={11} tickFormatter={(v) => fmtMoney(v)} />
           <Tooltip
-            contentStyle={{ background: "#111", border: "1px solid #333" }}
+            cursor={{ fill: "rgba(255,255,255,0.05)" }}
+            contentStyle={{ background: "#111", border: "1px solid #333", color: "#e5e5e5" }}
+            labelStyle={{ color: "#a3a3a3" }}
+            itemStyle={{ color: "#e5e5e5" }}
             formatter={(v, name) =>
               name === "pnl" ? fmtMoney(Number(v)) : fmtNum(Number(v))
             }
