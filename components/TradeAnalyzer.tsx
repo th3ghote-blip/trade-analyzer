@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, RefObject } from "react";
 import {
   Bar,
   BarChart,
@@ -111,10 +111,15 @@ export default function TradeAnalyzer() {
     cacheCreated: number;
   } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const equityChartRef = useRef<HTMLDivElement>(null);
+  const hourChartRef = useRef<HTMLDivElement>(null);
+  const dowChartRef = useRef<HTMLDivElement>(null);
+  const holdChartRef = useRef<HTMLDivElement>(null);
 
   // --- Saved-account state ---
   const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState<string>("");
+  const [pdfLoading, setPdfLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [accountsRefreshKey, setAccountsRefreshKey] = useState(0);
@@ -271,6 +276,191 @@ export default function TradeAnalyzer() {
         text: null,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  async function downloadPdf() {
+    setPdfLoading(true);
+    try {
+      const [{ jsPDF }, { toPng }] = await Promise.all([
+        import("jspdf"),
+        import("html-to-image"),
+      ]);
+
+      const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pw = pdf.internal.pageSize.getWidth();
+      const ph = pdf.internal.pageSize.getHeight();
+      const margin = 14;
+      const cw = pw - margin * 2;
+      let y = margin;
+
+      const fillPage = () => {
+        pdf.setFillColor(17, 17, 17);
+        pdf.rect(0, 0, pw, ph, "F");
+      };
+      fillPage();
+
+      const checkPage = (needed: number) => {
+        if (y + needed > ph - margin) {
+          pdf.addPage();
+          fillPage();
+          y = margin;
+        }
+      };
+
+      const heading = (text: string) => {
+        checkPage(12);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(12);
+        pdf.setTextColor(210, 210, 210);
+        pdf.text(text, margin, y);
+        y += 7;
+      };
+
+      const line = (
+        text: string,
+        size = 9,
+        color: [number, number, number] = [170, 170, 170],
+      ) => {
+        const lines = pdf.splitTextToSize(text, cw) as string[];
+        const h = lines.length * (size * 0.45) + 2;
+        checkPage(h);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(size);
+        pdf.setTextColor(...color);
+        pdf.text(lines, margin, y);
+        y += h;
+      };
+
+      const addChart = async (ref: RefObject<HTMLDivElement>, maxH: number) => {
+        if (!ref.current) return;
+        const dataUrl = await toPng(ref.current, {
+          pixelRatio: 2,
+          backgroundColor: "#111111",
+        });
+        const props = pdf.getImageProperties(dataUrl);
+        const imgH = Math.min((props.height / props.width) * cw, maxH);
+        checkPage(imgH + 4);
+        pdf.addImage(dataUrl, "PNG", margin, y, cw, imgH);
+        y += imgH + 4;
+      };
+
+      // Title
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(18);
+      pdf.setTextColor(230, 230, 230);
+      pdf.text("Trade Analysis Report", margin, y);
+      y += 9;
+      const accountTitle = [meta.label, meta.mt4Number].filter(Boolean).join(" · ");
+      if (accountTitle) {
+        pdf.setFontSize(11);
+        pdf.setFont("helvetica", "normal");
+        pdf.setTextColor(140, 140, 140);
+        pdf.text(accountTitle, margin, y);
+        y += 6;
+      }
+      if (meta.crmLink) {
+        pdf.setFontSize(8);
+        pdf.setTextColor(100, 100, 100);
+        pdf.text(meta.crmLink, margin, y);
+        y += 5;
+      }
+      pdf.setFontSize(8);
+      pdf.setTextColor(80, 80, 80);
+      pdf.text(`Generated ${new Date().toLocaleString()}`, margin, y);
+      y += 8;
+      pdf.setDrawColor(50, 50, 50);
+      pdf.line(margin, y, pw - margin, y);
+      y += 6;
+
+      // Summary stats
+      heading("Account Summary");
+      const stats: [string, string][] = [
+        ["Net P&L", fmtMoney(summary.netPnl)],
+        ["Win rate", fmtPct(summary.winRate)],
+        ["Profit factor", Number.isFinite(summary.profitFactor) ? summary.profitFactor.toFixed(2) : "n/a"],
+        ["Expectancy", fmtMoney(summary.expectancy)],
+        ["Closed trades", fmtNum(summary.closedTrades)],
+        ["Largest loss", fmtMoney(summary.largestLoss)],
+        ["Largest win", fmtMoney(summary.largestWin)],
+        ["Date range", `${fmtDate(summary.dateFrom)} → ${fmtDate(summary.dateTo)}`],
+      ];
+      const colW = cw / 2;
+      for (let i = 0; i < stats.length; i += 2) {
+        checkPage(9);
+        pdf.setFontSize(7);
+        pdf.setFont("helvetica", "normal");
+        pdf.setTextColor(90, 90, 90);
+        pdf.text(stats[i][0], margin, y);
+        if (stats[i + 1]) pdf.text(stats[i + 1][0], margin + colW, y);
+        y += 3.5;
+        pdf.setFontSize(10);
+        pdf.setTextColor(210, 210, 210);
+        pdf.text(stats[i][1], margin, y);
+        if (stats[i + 1]) pdf.text(stats[i + 1][1], margin + colW, y);
+        y += 5.5;
+      }
+      y += 3;
+
+      // Equity curve
+      heading("Equity Curve");
+      await addChart(equityChartRef, 68);
+
+      // Bar charts
+      heading("P&L Breakdowns");
+      await addChart(hourChartRef, 52);
+      await addChart(dowChartRef, 52);
+      await addChart(holdChartRef, 52);
+
+      // Symbol table
+      heading("P&L by Symbol (top 15)");
+      pdf.setFont("courier", "normal");
+      for (const r of symbolStats.slice(0, 15)) {
+        checkPage(5);
+        pdf.setFontSize(8);
+        const pnlColor: [number, number, number] =
+          r.totalPnl >= 0 ? [52, 211, 153] : [248, 113, 113];
+        pdf.setTextColor(170, 170, 170);
+        pdf.text(
+          `${r.symbol.padEnd(10)} ${String(r.trades).padStart(4)} trades  ${fmtPct(r.winRate).padStart(6)} win`,
+          margin,
+          y,
+        );
+        pdf.setTextColor(...pnlColor);
+        pdf.text(fmtMoney(r.totalPnl), margin + cw - 24, y);
+        y += 5;
+      }
+      y += 4;
+
+      // Anomalies
+      heading(`Flagged Anomalies (${anomalies.length})`);
+      for (const a of anomalies.slice(0, 80)) {
+        const color: [number, number, number] =
+          a.severity === "high"
+            ? [248, 113, 113]
+            : a.severity === "warn"
+              ? [251, 191, 36]
+              : [110, 110, 110];
+        line(`${a.severity === "high" ? "●" : a.severity === "warn" ? "◆" : "○"} #${a.ticket}  ${a.summary}`, 8, color);
+      }
+      if (anomalies.length > 80) {
+        line(`… and ${anomalies.length - 80} more anomalies`, 8, [80, 80, 80]);
+      }
+      y += 4;
+
+      // AI analysis
+      if (aiState.text) {
+        heading("AI Analysis");
+        line(aiState.text, 9);
+      }
+
+      const filename =
+        [meta.label || "account", meta.mt4Number, new Date().toISOString().slice(0, 10)]
+          .filter(Boolean)
+          .join("-") + ".pdf";
+      pdf.save(filename);
+    } finally {
+      setPdfLoading(false);
     }
   }
 
@@ -522,6 +712,23 @@ export default function TradeAnalyzer() {
         <EmptyState />
       ) : (
         <>
+          <section className="mb-4 flex gap-3">
+            <button
+              onClick={runAi}
+              disabled={aiState.loading || anomalies.length === 0}
+              className="px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm font-medium"
+            >
+              {aiState.loading ? "Analyzing…" : "Run AI report"}
+            </button>
+            <button
+              onClick={downloadPdf}
+              disabled={pdfLoading}
+              className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 text-sm font-medium"
+            >
+              {pdfLoading ? "Building PDF…" : "Download PDF"}
+            </button>
+          </section>
+
           <section className="mb-6 p-3 rounded border border-neutral-800 bg-neutral-900/50">
             <div className="flex flex-wrap items-center gap-4">
               <Toggle
@@ -643,7 +850,7 @@ export default function TradeAnalyzer() {
           <SummaryCards summary={summary} />
 
           <Section title="Equity curve">
-            <div className="h-72">
+            <div ref={equityChartRef} className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={equity.points}>
                   <CartesianGrid stroke="#222" />
@@ -689,13 +896,13 @@ export default function TradeAnalyzer() {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
             <Section title="P&L by hour (UTC of open)">
-              <BarBlock data={hourBuckets} xKey="hour" />
+              <div ref={hourChartRef}><BarBlock data={hourBuckets} xKey="hour" /></div>
             </Section>
             <Section title="P&L by day of week">
-              <BarBlock data={dowBuckets} xKey="label" />
+              <div ref={dowChartRef}><BarBlock data={dowBuckets} xKey="label" /></div>
             </Section>
             <Section title="P&L by hold time">
-              <BarBlock data={holdBuckets} xKey="bucket" />
+              <div ref={holdChartRef}><BarBlock data={holdBuckets} xKey="bucket" /></div>
             </Section>
             <Section title="P&L by symbol (top 15)">
               <SymbolTable rows={symbolStats.slice(0, 15)} />
@@ -708,18 +915,7 @@ export default function TradeAnalyzer() {
 
           <TradesTable trades={filtered} />
 
-          <Section
-            title="AI report"
-            right={
-              <button
-                onClick={runAi}
-                disabled={aiState.loading || anomalies.length === 0}
-                className="px-3 py-1 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm"
-              >
-                {aiState.loading ? "Analyzing…" : "Run AI report"}
-              </button>
-            }
-          >
+          <Section title="AI report">
             {aiState.error ? (
               <p className="text-sm text-red-400">Error: {aiState.error}</p>
             ) : aiState.text ? (
