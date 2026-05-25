@@ -1,4 +1,5 @@
 import type { Trade, Anomaly } from "./types";
+import { drawdownEvents, summarize } from "./stats";
 
 // --- helpers ---
 const MINUTE = 60_000;
@@ -199,6 +200,68 @@ export function detectStopMods(trades: Trade[]): Anomaly[] {
   return out;
 }
 
+/**
+ * After a significant drawdown / margin call, is the trader winning at a rate
+ * meaningfully higher than their overall sample? Often a sign of:
+ *   - account state was reset / rolled over
+ *   - intervention (manual price feed adjustment)
+ *   - the trader switched strategies after the wipeout
+ * Anything of these is worth a closer look.
+ */
+export function detectPostDrawdownStreak(trades: Trade[]): Anomaly[] {
+  const closed = trades.filter((t) => t.isClosed && !t.isPending);
+  if (closed.length < 50) return [];
+  const dds = drawdownEvents(closed, 200);
+  if (dds.length === 0) return [];
+  // Largest by magnitude (already sorted most-negative-first by drawdownEvents)
+  const worst = dds[0];
+  if (!worst.troughDate) return [];
+
+  const troughTs = Date.parse(worst.troughDate + "T23:59:59Z");
+  const post = closed.filter((t) => t.closeTime.getTime() > troughTs);
+  if (post.length < 10) return [];
+
+  const overallStat = summarize(closed);
+  const postStat = summarize(post);
+
+  const winRateLift = postStat.winRate - overallStat.winRate;
+  const expectancyLift = postStat.expectancy - overallStat.expectancy;
+
+  // Require both a meaningful win-rate jump AND positive expectancy shift.
+  if (winRateLift < 0.15) return [];
+  if (postStat.winRate < 0.7) return [];
+
+  // Attach the first post-trough trade as the representative anchor.
+  const anchor = post
+    .slice()
+    .sort((a, b) => a.closeTime.getTime() - b.closeTime.getTime())[0];
+
+  const severity: Anomaly["severity"] =
+    postStat.winRate >= 0.9 || winRateLift >= 0.3 ? "high" : "warn";
+
+  return [
+    {
+      ticket: anchor.ticket,
+      category: "post_drawdown_streak",
+      severity,
+      summary:
+        `Post-drawdown streak: after ${formatMoney(worst.magnitude)} drawdown ` +
+        `(trough ${worst.troughDate}), ${post.length} trades ran at ` +
+        `${(postStat.winRate * 100).toFixed(1)}% win rate ` +
+        `vs ${(overallStat.winRate * 100).toFixed(1)}% overall. ` +
+        `Net post-trough: ${formatMoney(postStat.netPnl)}, ` +
+        `expectancy lift ${formatMoney(expectancyLift)}/trade.`,
+      trade: anchor,
+    },
+  ];
+}
+
+function formatMoney(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  return `${sign}$${abs >= 1000 ? abs.toLocaleString("en-US", { maximumFractionDigits: 0 }) : abs.toFixed(2)}`;
+}
+
 // --- Aggregate ---
 
 export function detectAll(trades: Trade[]): Anomaly[] {
@@ -212,6 +275,7 @@ export function detectAll(trades: Trade[]): Anomaly[] {
     ...detectMartingale(trades),
     ...detectLongHolds(trades),
     ...detectStopMods(trades),
+    ...detectPostDrawdownStreak(trades),
   ].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
 }
 

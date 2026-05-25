@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -16,16 +16,20 @@ import {
 } from "recharts";
 import { parseTradesCsv } from "@/lib/parser";
 import {
+  AdvancedFilters,
   applyFilters,
   byDow,
   byHold,
   byHour,
   bySymbol,
   equityCurve,
+  OutcomeFilter,
+  SideFilter,
   summarize,
 } from "@/lib/stats";
 import { detectAll } from "@/lib/detectors";
 import { fmtDate, fmtHold, fmtMoney, fmtNum, fmtPct } from "@/lib/format";
+import { buildChatContext } from "@/lib/contextBundle";
 import type { AccountMeta, Anomaly, Trade } from "@/lib/types";
 
 const META_KEY = "trade-analyzer.account-meta";
@@ -35,20 +39,77 @@ const SAMPLE_CSV = `#\tOpenTime\tOpenPrice\tCloseTime\tClosePrice\tReason\tComme
 77186346\t2024-09-23 21:58:38\t1.11131\t2024-09-27 01:54:48\t1.1177\tMobile\t\tEURUSD\tSell\t0.01\t0\t0\t0.00\t-6.39\t-6.39
 77389053\t2024-10-14 15:26:40\t730.65\t2024-10-14 15:26:53\t722.85\tDealer\tBenefit Trade\tNETFLIX\tSell\t1.50\t730.66\t718\t0.00\t1170.00\t1170.00`;
 
+interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+type SortKey = "openTime" | "closeTime" | "symbol" | "volume" | "holdMinutes" | "total";
+
+interface AdvFilterState {
+  dateFrom: string;
+  dateTo: string;
+  minPnl: string;
+  maxPnl: string;
+  minHold: string;
+  maxHold: string;
+  minVolume: string;
+  maxVolume: string;
+  outcome: OutcomeFilter;
+  side: SideFilter;
+}
+
+const EMPTY_ADV: AdvFilterState = {
+  dateFrom: "",
+  dateTo: "",
+  minPnl: "",
+  maxPnl: "",
+  minHold: "",
+  maxHold: "",
+  minVolume: "",
+  maxVolume: "",
+  outcome: "all",
+  side: "all",
+};
+
+const SAMPLE_QUESTIONS = [
+  "Since the last drawdown, what's the win rate and is it abnormal?",
+  "Which symbols carry most of the net P&L?",
+  "Are there clusters of dealer-routed trades that look suspicious?",
+  "What changed after the biggest loss?",
+  "Is there evidence of martingale recovery attempts?",
+];
+
 export default function TradeAnalyzer() {
   const [meta, setMeta] = useState<AccountMeta>({ label: "", mt4Number: "", crmLink: "" });
   const [rawCsv, setRawCsv] = useState("");
   const [trades, setTrades] = useState<Trade[]>([]);
   const [parseInfo, setParseInfo] = useState<{ skipped: number; errors: string[] } | null>(null);
+
   const [includeDealer, setIncludeDealer] = useState(false);
   const [includePending, setIncludePending] = useState(false);
   const [symbolFilter, setSymbolFilter] = useState<string>("");
+  const [adv, setAdv] = useState<AdvFilterState>(EMPTY_ADV);
+  const [advOpen, setAdvOpen] = useState(false);
+
   const [aiState, setAiState] = useState<{
     loading: boolean;
     text: string | null;
     error: string | null;
     tokens?: { input: number; output: number };
   }>({ loading: false, text: null, error: null });
+
+  const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [chatUsage, setChatUsage] = useState<{
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreated: number;
+  } | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load persisted meta + csv
   useEffect(() => {
@@ -73,6 +134,10 @@ export default function TradeAnalyzer() {
     } catch {}
   }, [meta]);
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory, chatLoading]);
+
   function loadCsv(text: string) {
     setRawCsv(text);
     try {
@@ -82,6 +147,9 @@ export default function TradeAnalyzer() {
     setTrades(res.trades);
     setParseInfo({ skipped: res.skipped, errors: res.errors });
     setAiState({ loading: false, text: null, error: null });
+    setChatHistory([]);
+    setChatError(null);
+    setChatUsage(null);
   }
 
   function clearAll() {
@@ -89,20 +157,36 @@ export default function TradeAnalyzer() {
     setTrades([]);
     setParseInfo(null);
     setAiState({ loading: false, text: null, error: null });
+    setChatHistory([]);
+    setChatError(null);
+    setChatUsage(null);
     try {
       localStorage.removeItem(CSV_KEY);
     } catch {}
   }
 
-  const filtered = useMemo(
-    () =>
-      applyFilters(trades, {
-        includeDealer,
-        includePending,
-        symbols: symbolFilter ? [symbolFilter] : undefined,
-      }),
-    [trades, includeDealer, includePending, symbolFilter],
-  );
+  const builtFilters = useMemo<AdvancedFilters>(() => {
+    const num = (s: string) => (s === "" ? null : Number(s));
+    const dt = (s: string) => (s ? new Date(s + "T00:00:00Z") : null);
+    const dtEnd = (s: string) => (s ? new Date(s + "T23:59:59Z") : null);
+    return {
+      includeDealer,
+      includePending,
+      symbols: symbolFilter ? [symbolFilter] : undefined,
+      dateFrom: dt(adv.dateFrom),
+      dateTo: dtEnd(adv.dateTo),
+      minPnl: num(adv.minPnl),
+      maxPnl: num(adv.maxPnl),
+      minHoldMinutes: num(adv.minHold),
+      maxHoldMinutes: num(adv.maxHold),
+      minVolume: num(adv.minVolume),
+      maxVolume: num(adv.maxVolume),
+      outcome: adv.outcome,
+      side: adv.side,
+    };
+  }, [includeDealer, includePending, symbolFilter, adv]);
+
+  const filtered = useMemo(() => applyFilters(trades, builtFilters), [trades, builtFilters]);
 
   const summary = useMemo(() => summarize(filtered), [filtered]);
   const symbolStats = useMemo(() => bySymbol(filtered), [filtered]);
@@ -111,6 +195,11 @@ export default function TradeAnalyzer() {
   const holdBuckets = useMemo(() => byHold(filtered), [filtered]);
   const equity = useMemo(() => equityCurve(filtered), [filtered]);
   const anomalies = useMemo(() => detectAll(filtered), [filtered]);
+
+  const chatContext = useMemo(
+    () => buildChatContext(filtered, anomalies),
+    [filtered, anomalies],
+  );
 
   const allSymbols = useMemo(() => {
     const s = new Set(trades.map((t) => t.symbol));
@@ -174,6 +263,40 @@ export default function TradeAnalyzer() {
         text: null,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  async function askQuestion(q: string) {
+    const question = q.trim();
+    if (!question || chatLoading) return;
+    const nextHistory: ChatTurn[] = [...chatHistory, { role: "user", content: question }];
+    setChatHistory(nextHistory);
+    setChatInput("");
+    setChatLoading(true);
+    setChatError(null);
+    try {
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          question,
+          history: chatHistory,
+          contextBlock: chatContext,
+          accountLabel: meta.label,
+          mt4Number: meta.mt4Number,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setChatError(data.error ?? "Unknown error");
+        return;
+      }
+      setChatHistory([...nextHistory, { role: "assistant", content: data.answer }]);
+      setChatUsage(data.usage);
+    } catch (err) {
+      setChatError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatLoading(false);
     }
   }
 
@@ -257,35 +380,122 @@ export default function TradeAnalyzer() {
         <EmptyState />
       ) : (
         <>
-          <section className="flex flex-wrap items-center gap-4 mb-6 p-3 rounded border border-neutral-800 bg-neutral-900/50">
-            <Toggle
-              label="Include dealer trades"
-              checked={includeDealer}
-              onChange={setIncludeDealer}
-            />
-            <Toggle
-              label="Include pending / cancelled"
-              checked={includePending}
-              onChange={setIncludePending}
-            />
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-neutral-400">Symbol:</span>
-              <select
-                value={symbolFilter}
-                onChange={(e) => setSymbolFilter(e.target.value)}
-                className="bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-sm"
+          <section className="mb-6 p-3 rounded border border-neutral-800 bg-neutral-900/50">
+            <div className="flex flex-wrap items-center gap-4">
+              <Toggle
+                label="Include dealer trades"
+                checked={includeDealer}
+                onChange={setIncludeDealer}
+              />
+              <Toggle
+                label="Include pending / cancelled"
+                checked={includePending}
+                onChange={setIncludePending}
+              />
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-neutral-400">Symbol:</span>
+                <select
+                  value={symbolFilter}
+                  onChange={(e) => setSymbolFilter(e.target.value)}
+                  className="bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-sm"
+                >
+                  <option value="">All ({allSymbols.length})</option>
+                  {allSymbols.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={() => setAdvOpen((v) => !v)}
+                className="text-xs px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700"
               >
-                <option value="">All ({allSymbols.length})</option>
-                {allSymbols.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
+                {advOpen ? "Hide" : "Show"} advanced filters
+              </button>
+              <button
+                onClick={() => setAdv(EMPTY_ADV)}
+                className="text-xs text-neutral-500 hover:text-neutral-300"
+              >
+                Reset advanced
+              </button>
+              <div className="ml-auto text-xs text-neutral-500">
+                Showing {filtered.length.toLocaleString()} of {trades.length.toLocaleString()} trades
+              </div>
             </div>
-            <div className="ml-auto text-xs text-neutral-500">
-              Showing {filtered.length.toLocaleString()} of {trades.length.toLocaleString()} trades
-            </div>
+            {advOpen ? (
+              <div className="mt-3 pt-3 border-t border-neutral-800 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                <AdvField
+                  label="Date from"
+                  type="date"
+                  value={adv.dateFrom}
+                  onChange={(v) => setAdv({ ...adv, dateFrom: v })}
+                />
+                <AdvField
+                  label="Date to"
+                  type="date"
+                  value={adv.dateTo}
+                  onChange={(v) => setAdv({ ...adv, dateTo: v })}
+                />
+                <AdvField
+                  label="Min P&L ($)"
+                  type="number"
+                  value={adv.minPnl}
+                  onChange={(v) => setAdv({ ...adv, minPnl: v })}
+                />
+                <AdvField
+                  label="Max P&L ($)"
+                  type="number"
+                  value={adv.maxPnl}
+                  onChange={(v) => setAdv({ ...adv, maxPnl: v })}
+                />
+                <AdvField
+                  label="Min hold (min)"
+                  type="number"
+                  value={adv.minHold}
+                  onChange={(v) => setAdv({ ...adv, minHold: v })}
+                />
+                <AdvField
+                  label="Max hold (min)"
+                  type="number"
+                  value={adv.maxHold}
+                  onChange={(v) => setAdv({ ...adv, maxHold: v })}
+                />
+                <AdvField
+                  label="Min volume (lots)"
+                  type="number"
+                  value={adv.minVolume}
+                  onChange={(v) => setAdv({ ...adv, minVolume: v })}
+                />
+                <AdvField
+                  label="Max volume (lots)"
+                  type="number"
+                  value={adv.maxVolume}
+                  onChange={(v) => setAdv({ ...adv, maxVolume: v })}
+                />
+                <AdvSelect
+                  label="Outcome"
+                  value={adv.outcome}
+                  onChange={(v) => setAdv({ ...adv, outcome: v as OutcomeFilter })}
+                  options={[
+                    ["all", "All"],
+                    ["wins", "Wins only"],
+                    ["losses", "Losses only"],
+                    ["breakeven", "Breakeven"],
+                  ]}
+                />
+                <AdvSelect
+                  label="Side"
+                  value={adv.side}
+                  onChange={(v) => setAdv({ ...adv, side: v as SideFilter })}
+                  options={[
+                    ["all", "All"],
+                    ["buy", "Buy"],
+                    ["sell", "Sell"],
+                  ]}
+                />
+              </div>
+            ) : null}
           </section>
 
           <SummaryCards summary={summary} />
@@ -303,18 +513,26 @@ export default function TradeAnalyzer() {
                     stroke="#888"
                     fontSize={11}
                   />
-                  <YAxis
-                    stroke="#888"
-                    fontSize={11}
-                    tickFormatter={(v) => fmtMoney(v)}
-                  />
+                  <YAxis stroke="#888" fontSize={11} tickFormatter={(v) => fmtMoney(v)} />
                   <Tooltip
                     contentStyle={{ background: "#111", border: "1px solid #333" }}
                     labelFormatter={(t) => new Date(Number(t)).toISOString().slice(0, 16)}
                     formatter={(v) => fmtMoney(Number(v))}
                   />
-                  <Line type="monotone" dataKey="equity" stroke="#60a5fa" dot={false} strokeWidth={2} />
-                  <Line type="monotone" dataKey="drawdown" stroke="#ef4444" dot={false} strokeWidth={1} />
+                  <Line
+                    type="monotone"
+                    dataKey="equity"
+                    stroke="#60a5fa"
+                    dot={false}
+                    strokeWidth={2}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="drawdown"
+                    stroke="#ef4444"
+                    dot={false}
+                    strokeWidth={1}
+                  />
                   <Legend wrapperStyle={{ color: "#aaa", fontSize: 12 }} />
                 </LineChart>
               </ResponsiveContainer>
@@ -344,15 +562,17 @@ export default function TradeAnalyzer() {
             <AnomalyList anomalies={anomalies} />
           </Section>
 
+          <TradesTable trades={filtered} />
+
           <Section
-            title="AI analysis"
+            title="AI report"
             right={
               <button
                 onClick={runAi}
                 disabled={aiState.loading || anomalies.length === 0}
                 className="px-3 py-1 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm"
               >
-                {aiState.loading ? "Analyzing…" : "Run AI analysis"}
+                {aiState.loading ? "Analyzing…" : "Run AI report"}
               </button>
             }
           >
@@ -371,18 +591,40 @@ export default function TradeAnalyzer() {
               </>
             ) : (
               <p className="text-sm text-neutral-500">
-                Click &ldquo;Run AI analysis&rdquo; to send the flagged anomalies and account summary to
-                Claude. Trade rows themselves are not sent &mdash; only the detector findings and
-                aggregate stats.
+                One-shot narrative report on the flagged anomalies. Click &ldquo;Run AI
+                report&rdquo; — only detector findings and aggregate stats are sent, not raw trades.
               </p>
             )}
+          </Section>
+
+          <Section
+            title="Ask a question"
+            right={
+              chatUsage ? (
+                <span className="text-xs text-neutral-500">
+                  last turn: {chatUsage.input} in
+                  {chatUsage.cacheRead ? ` (${chatUsage.cacheRead} cached)` : ""} /{" "}
+                  {chatUsage.output} out
+                </span>
+              ) : null
+            }
+          >
+            <ChatPanel
+              history={chatHistory}
+              loading={chatLoading}
+              error={chatError}
+              input={chatInput}
+              setInput={setChatInput}
+              onSend={(q) => askQuestion(q)}
+              endRef={chatEndRef}
+            />
           </Section>
         </>
       )}
 
       <footer className="text-xs text-neutral-600 mt-12 pb-4 text-center">
-        Trade Analyzer · all parsing happens in your browser · AI analysis sends only flagged
-        anomalies + aggregate stats.
+        Trade Analyzer · all parsing happens in your browser · AI calls send only aggregated
+        context, not raw trades.
       </footer>
     </main>
   );
@@ -405,6 +647,53 @@ function Field(props: { label: string; value: string; onChange: (v: string) => v
   );
 }
 
+function AdvField(props: {
+  label: string;
+  type: "date" | "number" | "text";
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-1">
+        {props.label}
+      </span>
+      <input
+        type={props.type}
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+        className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-sm"
+      />
+    </label>
+  );
+}
+
+function AdvSelect(props: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<[string, string]>;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-[10px] uppercase tracking-wide text-neutral-500 mb-1">
+        {props.label}
+      </span>
+      <select
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+        className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-sm"
+      >
+        {props.options.map(([v, label]) => (
+          <option key={v} value={v}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function Toggle(props: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
@@ -418,7 +707,15 @@ function Toggle(props: { label: string; checked: boolean; onChange: (v: boolean)
   );
 }
 
-function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
+function Section({
+  title,
+  children,
+  right,
+}: {
+  title: string;
+  children: React.ReactNode;
+  right?: React.ReactNode;
+}) {
   return (
     <section className="mb-6 border border-neutral-800 rounded bg-neutral-900/40 p-4">
       <div className="flex items-center justify-between mb-3">
@@ -566,9 +863,292 @@ function AnomalyList({ anomalies }: { anomalies: Anomaly[] }) {
 }
 
 function SeverityDot({ s }: { s: Anomaly["severity"] }) {
-  const cls =
-    s === "high" ? "bg-red-500" : s === "warn" ? "bg-amber-400" : "bg-neutral-500";
+  const cls = s === "high" ? "bg-red-500" : s === "warn" ? "bg-amber-400" : "bg-neutral-500";
   return <span className={`mt-1.5 inline-block w-2 h-2 rounded-full ${cls}`} aria-label={s} />;
+}
+
+function TradesTable({ trades }: { trades: Trade[] }) {
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
+    key: "openTime",
+    dir: "desc",
+  });
+  const [page, setPage] = useState(0);
+  const pageSize = 50;
+
+  const sorted = useMemo(() => {
+    const arr = [...trades];
+    arr.sort((a, b) => {
+      const dir = sort.dir === "asc" ? 1 : -1;
+      switch (sort.key) {
+        case "openTime":
+          return (a.openTime.getTime() - b.openTime.getTime()) * dir;
+        case "closeTime":
+          return (a.closeTime.getTime() - b.closeTime.getTime()) * dir;
+        case "symbol":
+          return a.symbol.localeCompare(b.symbol) * dir;
+        case "volume":
+          return (a.volume - b.volume) * dir;
+        case "holdMinutes":
+          return (a.holdMinutes - b.holdMinutes) * dir;
+        case "total":
+          return (a.total - b.total) * dir;
+      }
+    });
+    return arr;
+  }, [trades, sort]);
+
+  const visible = sorted.slice(page * pageSize, (page + 1) * pageSize);
+  const pages = Math.max(1, Math.ceil(sorted.length / pageSize));
+
+  function toggleSort(key: SortKey) {
+    setPage(0);
+    setSort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: key === "openTime" || key === "closeTime" ? "desc" : "desc" },
+    );
+  }
+
+  function exportCsv() {
+    const headers = [
+      "ticket",
+      "openTime",
+      "closeTime",
+      "symbol",
+      "side",
+      "volume",
+      "openPrice",
+      "closePrice",
+      "holdMinutes",
+      "profit",
+      "swaps",
+      "total",
+      "reason",
+      "comment",
+    ];
+    const rows = sorted.map((t) =>
+      [
+        t.ticket,
+        t.openTime.toISOString(),
+        t.closeTime.toISOString(),
+        t.symbol,
+        t.side,
+        t.volume,
+        t.openPrice,
+        t.closePrice,
+        t.holdMinutes.toFixed(2),
+        t.profit,
+        t.swaps,
+        t.total,
+        t.reason,
+        `"${t.comment.replace(/"/g, '""')}"`,
+      ].join(","),
+    );
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trades-filtered-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <Section
+      title={`Trades (${trades.length})`}
+      right={
+        <button
+          onClick={exportCsv}
+          disabled={trades.length === 0}
+          className="text-xs px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40"
+        >
+          Export CSV
+        </button>
+      }
+    >
+      <div className="overflow-x-auto scrollbar-thin">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-neutral-500 uppercase">
+              <SortHeader col="openTime" sort={sort} onClick={toggleSort}>
+                Open
+              </SortHeader>
+              <SortHeader col="closeTime" sort={sort} onClick={toggleSort}>
+                Close
+              </SortHeader>
+              <SortHeader col="symbol" sort={sort} onClick={toggleSort}>
+                Symbol
+              </SortHeader>
+              <th className="py-1 px-2">Side</th>
+              <SortHeader col="volume" sort={sort} onClick={toggleSort} align="right">
+                Vol
+              </SortHeader>
+              <SortHeader col="holdMinutes" sort={sort} onClick={toggleSort} align="right">
+                Hold
+              </SortHeader>
+              <SortHeader col="total" sort={sort} onClick={toggleSort} align="right">
+                P&L
+              </SortHeader>
+              <th className="py-1 px-2">Reason</th>
+              <th className="py-1 px-2">Comment</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((t) => (
+              <tr key={t.ticket} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+                <td className="py-1 px-2 font-mono whitespace-nowrap">{fmtDate(t.openTime)}</td>
+                <td className="py-1 px-2 font-mono whitespace-nowrap">{fmtDate(t.closeTime)}</td>
+                <td className="py-1 px-2 font-mono">{t.symbol}</td>
+                <td className="py-1 px-2">{t.side}</td>
+                <td className="py-1 px-2 text-right">{t.volume}</td>
+                <td className="py-1 px-2 text-right">{fmtHold(t.holdMinutes)}</td>
+                <td
+                  className={`py-1 px-2 text-right font-mono ${t.total > 0 ? "text-emerald-400" : t.total < 0 ? "text-red-400" : "text-neutral-500"}`}
+                >
+                  {fmtMoney(t.total)}
+                </td>
+                <td className="py-1 px-2 text-neutral-400">{t.reason}</td>
+                <td className="py-1 px-2 text-neutral-500 max-w-[240px] truncate" title={t.comment}>
+                  {t.comment}
+                </td>
+              </tr>
+            ))}
+            {visible.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="py-4 text-center text-neutral-500">
+                  No trades match the current filter.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      {pages > 1 ? (
+        <div className="flex items-center justify-between mt-3 text-xs">
+          <span className="text-neutral-500">
+            Page {page + 1} of {pages} ({trades.length.toLocaleString()} trades)
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="px-2 py-1 rounded bg-neutral-800 disabled:opacity-30 hover:bg-neutral-700"
+            >
+              ← Prev
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.min(pages - 1, p + 1))}
+              disabled={page >= pages - 1}
+              className="px-2 py-1 rounded bg-neutral-800 disabled:opacity-30 hover:bg-neutral-700"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </Section>
+  );
+}
+
+function SortHeader({
+  col,
+  sort,
+  onClick,
+  align,
+  children,
+}: {
+  col: SortKey;
+  sort: { key: SortKey; dir: "asc" | "desc" };
+  onClick: (k: SortKey) => void;
+  align?: "right";
+  children: React.ReactNode;
+}) {
+  const active = sort.key === col;
+  return (
+    <th
+      className={`py-1 px-2 cursor-pointer select-none ${align === "right" ? "text-right" : ""}`}
+      onClick={() => onClick(col)}
+    >
+      <span className={active ? "text-neutral-200" : ""}>{children}</span>
+      {active ? <span className="ml-1">{sort.dir === "asc" ? "↑" : "↓"}</span> : null}
+    </th>
+  );
+}
+
+function ChatPanel(props: {
+  history: ChatTurn[];
+  loading: boolean;
+  error: string | null;
+  input: string;
+  setInput: (v: string) => void;
+  onSend: (q: string) => void;
+  endRef: React.RefObject<HTMLDivElement>;
+}) {
+  return (
+    <div>
+      <div className="space-y-3 max-h-[480px] overflow-y-auto scrollbar-thin mb-3 pr-1">
+        {props.history.length === 0 && !props.loading ? (
+          <div>
+            <p className="text-sm text-neutral-500 mb-3">
+              Ask anything about the filtered trades. The model sees aggregates, drawdown events,
+              streaks, monthly breakdowns, the top losses/wins, and all flagged anomalies — not the
+              raw ticket-by-ticket data.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {SAMPLE_QUESTIONS.map((q) => (
+                <button
+                  key={q}
+                  onClick={() => props.onSend(q)}
+                  className="text-xs px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {props.history.map((turn, i) => (
+          <div key={i} className={turn.role === "user" ? "" : "border-l-2 border-blue-700 pl-3"}>
+            <div className="text-xs uppercase tracking-wide text-neutral-500 mb-1">
+              {turn.role === "user" ? "You" : "Claude"}
+            </div>
+            <div className="whitespace-pre-wrap text-sm">{turn.content}</div>
+          </div>
+        ))}
+        {props.loading ? (
+          <div className="border-l-2 border-blue-700 pl-3 text-sm text-neutral-400">Thinking…</div>
+        ) : null}
+        {props.error ? (
+          <div className="text-sm text-red-400">Error: {props.error}</div>
+        ) : null}
+        <div ref={props.endRef} />
+      </div>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onSend(props.input);
+        }}
+      >
+        <input
+          type="text"
+          value={props.input}
+          onChange={(e) => props.setInput(e.target.value)}
+          placeholder="Ask a question about these trades…"
+          className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-3 py-2 text-sm"
+          disabled={props.loading}
+        />
+        <button
+          type="submit"
+          disabled={props.loading || !props.input.trim()}
+          className="px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm"
+        >
+          Send
+        </button>
+      </form>
+    </div>
+  );
 }
 
 function EmptyState() {

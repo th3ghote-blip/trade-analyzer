@@ -41,7 +41,8 @@ export interface Anomaly {
     | "stop_modified_post_entry"
     | "unusually_long_hold"
     | "outsized_position"
-    | "weekend_fill";
+    | "weekend_fill"
+    | "post_drawdown_streak";
   severity: "info" | "warn" | "high";
   summary: string;
   trade: Trade;

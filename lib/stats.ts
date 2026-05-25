@@ -267,14 +267,279 @@ export function equityCurve(trades: Trade[]): { points: EquityPoint[]; dd: Drawd
   };
 }
 
-export function applyFilters(
-  trades: Trade[],
-  opts: { includeDealer: boolean; includePending: boolean; symbols?: string[] },
-): Trade[] {
+export type OutcomeFilter = "all" | "wins" | "losses" | "breakeven";
+export type SideFilter = "all" | "buy" | "sell";
+
+export interface AdvancedFilters {
+  includeDealer: boolean;
+  includePending: boolean;
+  symbols?: string[];
+  dateFrom?: Date | null;
+  dateTo?: Date | null;
+  minPnl?: number | null;
+  maxPnl?: number | null;
+  minHoldMinutes?: number | null;
+  maxHoldMinutes?: number | null;
+  minVolume?: number | null;
+  maxVolume?: number | null;
+  outcome?: OutcomeFilter;
+  side?: SideFilter;
+}
+
+export function applyFilters(trades: Trade[], opts: AdvancedFilters): Trade[] {
   return trades.filter((t) => {
     if (!opts.includeDealer && /dealer/i.test(t.reason)) return false;
     if (!opts.includePending && t.isPending) return false;
     if (opts.symbols && opts.symbols.length && !opts.symbols.includes(t.symbol)) return false;
+
+    if (opts.dateFrom && t.openTime.getTime() < opts.dateFrom.getTime()) return false;
+    if (opts.dateTo && t.openTime.getTime() > opts.dateTo.getTime()) return false;
+
+    if (opts.minPnl != null && t.total < opts.minPnl) return false;
+    if (opts.maxPnl != null && t.total > opts.maxPnl) return false;
+
+    if (opts.minHoldMinutes != null && t.holdMinutes < opts.minHoldMinutes) return false;
+    if (opts.maxHoldMinutes != null && t.holdMinutes > opts.maxHoldMinutes) return false;
+
+    if (opts.minVolume != null && t.volume < opts.minVolume) return false;
+    if (opts.maxVolume != null && t.volume > opts.maxVolume) return false;
+
+    if (opts.outcome === "wins" && t.total <= 0) return false;
+    if (opts.outcome === "losses" && t.total >= 0) return false;
+    if (opts.outcome === "breakeven" && t.total !== 0) return false;
+
+    if (opts.side === "buy" && !/^Buy/i.test(t.side)) return false;
+    if (opts.side === "sell" && !/^Sell/i.test(t.side)) return false;
+
     return true;
   });
+}
+
+// --- Time-series + drawdown events ---
+
+export interface DailyPoint {
+  date: string; // YYYY-MM-DD (UTC)
+  trades: number;
+  wins: number;
+  pnl: number;
+  cumulativePnl: number;
+}
+
+export function dailySeries(trades: Trade[]): DailyPoint[] {
+  const closed = trades
+    .filter((t) => t.isClosed && !t.isPending)
+    .sort((a, b) => a.closeTime.getTime() - b.closeTime.getTime());
+
+  const map = new Map<string, { trades: number; wins: number; pnl: number }>();
+  for (const t of closed) {
+    const key = t.closeTime.toISOString().slice(0, 10);
+    const prev = map.get(key) ?? { trades: 0, wins: 0, pnl: 0 };
+    prev.trades++;
+    prev.pnl += t.total;
+    if (t.total > 0) prev.wins++;
+    map.set(key, prev);
+  }
+
+  const out: DailyPoint[] = [];
+  let cum = 0;
+  for (const [date, agg] of Array.from(map.entries()).sort()) {
+    cum += agg.pnl;
+    out.push({ date, ...agg, cumulativePnl: cum });
+  }
+  return out;
+}
+
+export interface MonthlyPoint {
+  month: string; // YYYY-MM
+  trades: number;
+  pnl: number;
+  winRate: number;
+}
+
+export function monthlySeries(trades: Trade[]): MonthlyPoint[] {
+  const closed = trades.filter((t) => t.isClosed && !t.isPending);
+  const map = new Map<string, { trades: number; wins: number; pnl: number }>();
+  for (const t of closed) {
+    const key = t.closeTime.toISOString().slice(0, 7);
+    const prev = map.get(key) ?? { trades: 0, wins: 0, pnl: 0 };
+    prev.trades++;
+    prev.pnl += t.total;
+    if (t.total > 0) prev.wins++;
+    map.set(key, prev);
+  }
+  return Array.from(map.entries())
+    .sort()
+    .map(([month, a]) => ({
+      month,
+      trades: a.trades,
+      pnl: a.pnl,
+      winRate: a.trades ? a.wins / a.trades : 0,
+    }));
+}
+
+export interface DrawdownEvent {
+  peakDate: string;
+  peakEquity: number;
+  troughDate: string;
+  troughEquity: number;
+  recoveryDate: string | null;
+  recoveryDays: number | null;
+  magnitude: number; // negative number
+  magnitudePct: number; // negative number, fraction of peak
+  durationDays: number;
+}
+
+/**
+ * Identify drawdown cycles in the equity curve.
+ * A new event starts when equity makes a new all-time high then drops; it ends
+ * when equity returns to or exceeds the prior peak. The final (open) drawdown
+ * is included with recoveryDate=null.
+ */
+export function drawdownEvents(trades: Trade[], minMagnitude = 50): DrawdownEvent[] {
+  const closed = trades
+    .filter((t) => t.isClosed && !t.isPending)
+    .sort((a, b) => a.closeTime.getTime() - b.closeTime.getTime());
+
+  const events: DrawdownEvent[] = [];
+  let equity = 0;
+  let peak = 0;
+  let peakDate = closed[0]?.closeTime.toISOString().slice(0, 10) ?? "";
+  let troughEquity = 0;
+  let troughDate = peakDate;
+  let inDrawdown = false;
+
+  for (const t of closed) {
+    equity += t.total;
+    const day = t.closeTime.toISOString().slice(0, 10);
+
+    if (equity >= peak) {
+      // recovery or new peak
+      if (inDrawdown && peak - troughEquity >= minMagnitude) {
+        events.push({
+          peakDate,
+          peakEquity: peak,
+          troughDate,
+          troughEquity,
+          recoveryDate: day,
+          recoveryDays: daysBetween(peakDate, day),
+          magnitude: troughEquity - peak,
+          magnitudePct: peak ? (troughEquity - peak) / peak : 0,
+          durationDays: daysBetween(peakDate, day),
+        });
+      }
+      peak = equity;
+      peakDate = day;
+      troughEquity = equity;
+      troughDate = day;
+      inDrawdown = false;
+    } else {
+      if (!inDrawdown) {
+        inDrawdown = true;
+        troughEquity = equity;
+        troughDate = day;
+      } else if (equity < troughEquity) {
+        troughEquity = equity;
+        troughDate = day;
+      }
+    }
+  }
+
+  // Open drawdown at end of sample.
+  if (inDrawdown && peak - troughEquity >= minMagnitude) {
+    const lastDay = closed[closed.length - 1].closeTime.toISOString().slice(0, 10);
+    events.push({
+      peakDate,
+      peakEquity: peak,
+      troughDate,
+      troughEquity,
+      recoveryDate: null,
+      recoveryDays: null,
+      magnitude: troughEquity - peak,
+      magnitudePct: peak ? (troughEquity - peak) / peak : 0,
+      durationDays: daysBetween(peakDate, lastDay),
+    });
+  }
+
+  return events.sort((a, b) => a.magnitude - b.magnitude); // most negative first
+}
+
+function daysBetween(a: string, b: string): number {
+  const ta = Date.parse(a + "T00:00:00Z");
+  const tb = Date.parse(b + "T00:00:00Z");
+  return Math.round((tb - ta) / 86_400_000);
+}
+
+export interface Streak {
+  type: "win" | "loss";
+  length: number;
+  startDate: string;
+  endDate: string;
+  totalPnl: number;
+}
+
+export function findStreaks(trades: Trade[]): { longestWin: Streak | null; longestLoss: Streak | null } {
+  const closed = trades
+    .filter((t) => t.isClosed && !t.isPending)
+    .sort((a, b) => a.closeTime.getTime() - b.closeTime.getTime());
+
+  let curType: "win" | "loss" | null = null;
+  let curLen = 0;
+  let curStart = "";
+  let curEnd = "";
+  let curPnl = 0;
+  let longestWin: Streak | null = null;
+  let longestLoss: Streak | null = null;
+
+  const commit = () => {
+    if (!curType || curLen === 0) return;
+    const s: Streak = {
+      type: curType,
+      length: curLen,
+      startDate: curStart,
+      endDate: curEnd,
+      totalPnl: curPnl,
+    };
+    if (curType === "win" && (!longestWin || s.length > longestWin.length)) longestWin = s;
+    if (curType === "loss" && (!longestLoss || s.length > longestLoss.length)) longestLoss = s;
+  };
+
+  for (const t of closed) {
+    const day = t.closeTime.toISOString().slice(0, 10);
+    const type: "win" | "loss" | null = t.total > 0 ? "win" : t.total < 0 ? "loss" : null;
+    if (type === null) continue; // breakeven doesn't break streaks
+
+    if (type === curType) {
+      curLen++;
+      curPnl += t.total;
+      curEnd = day;
+    } else {
+      commit();
+      curType = type;
+      curLen = 1;
+      curStart = day;
+      curEnd = day;
+      curPnl = t.total;
+    }
+  }
+  commit();
+
+  return { longestWin, longestLoss };
+}
+
+export function windowStats(
+  trades: Trade[],
+  from: Date | null,
+  to: Date | null,
+): SummaryStat & { startedFrom: string; startedTo: string } {
+  const slice = trades.filter((t) => {
+    const ts = t.closeTime.getTime();
+    if (from && ts < from.getTime()) return false;
+    if (to && ts > to.getTime()) return false;
+    return true;
+  });
+  return {
+    ...summarize(slice),
+    startedFrom: from ? from.toISOString().slice(0, 10) : "open",
+    startedTo: to ? to.toISOString().slice(0, 10) : "open",
+  };
 }
