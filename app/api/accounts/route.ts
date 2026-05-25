@@ -91,18 +91,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ account: data });
   }
 
-  // No id supplied. If mt4_number is set, upsert on (owner_id, mt4_number).
+  // No id supplied. If mt4_number is set, look for an existing row first.
   if (payload.mt4_number) {
-    const { data, error } = await db
+    const { data: existing } = await db
       .from("accounts")
-      .upsert(payload, { onConflict: "owner_id,mt4_number" })
-      .select()
-      .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ account: data });
+      .select("id")
+      .eq("owner_id", owner)
+      .eq("mt4_number", payload.mt4_number)
+      .maybeSingle();
+    if (existing?.id) {
+      const { data, error } = await db
+        .from("accounts")
+        .update(payload)
+        .eq("id", existing.id)
+        .select()
+        .single();
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ account: data });
+    }
   }
 
-  // Brand-new row without mt4 number.
+  // Brand-new row.
   const { data, error } = await db.from("accounts").insert(payload).select().single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ account: data });
