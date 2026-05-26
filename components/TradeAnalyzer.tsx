@@ -671,8 +671,8 @@ export default function TradeAnalyzer() {
       </section>
 
       <section className="mb-6">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm uppercase tracking-wide text-neutral-400">Trade ledger</h2>
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <h2 className="text-sm uppercase tracking-wide text-neutral-400 flex-1">Trade ledger</h2>
           <div className="flex gap-2 text-xs">
             <button
               className="px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-700"
@@ -720,18 +720,18 @@ export default function TradeAnalyzer() {
         <EmptyState />
       ) : (
         <>
-          <section className="mb-4 flex gap-3">
+          <section className="mb-4 flex flex-wrap gap-3">
             <button
               onClick={runAi}
               disabled={aiState.loading || anomalies.length === 0}
-              className="px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm font-medium"
+              className="flex-1 sm:flex-none px-4 py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-sm font-medium"
             >
               {aiState.loading ? "Analyzing…" : "Run AI report"}
             </button>
             <button
               onClick={downloadPdf}
               disabled={pdfLoading}
-              className="px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 text-sm font-medium"
+              className="flex-1 sm:flex-none px-4 py-2 rounded bg-neutral-700 hover:bg-neutral-600 disabled:opacity-40 text-sm font-medium"
             >
               {pdfLoading ? "Building PDF…" : "Download PDF"}
             </button>
@@ -776,7 +776,7 @@ export default function TradeAnalyzer() {
               >
                 Reset advanced
               </button>
-              <div className="ml-auto text-xs text-neutral-500">
+              <div className="w-full sm:w-auto sm:ml-auto text-xs text-neutral-500">
                 Showing {filtered.length.toLocaleString()} of {trades.length.toLocaleString()} trades
               </div>
             </div>
@@ -1341,8 +1341,8 @@ function TradesTable({ trades }: { trades: Trade[] }) {
               <SortHeader col="total" sort={sort} onClick={toggleSort} align="right">
                 P&L
               </SortHeader>
-              <th className="py-1 px-2">Reason</th>
-              <th className="py-1 px-2">Comment</th>
+              <th className="py-1 px-2 hidden sm:table-cell">Reason</th>
+              <th className="py-1 px-2 hidden sm:table-cell">Comment</th>
             </tr>
           </thead>
           <tbody>
@@ -1359,15 +1359,15 @@ function TradesTable({ trades }: { trades: Trade[] }) {
                 >
                   {fmtMoney(t.total)}
                 </td>
-                <td className="py-1 px-2 text-neutral-400">{t.reason}</td>
-                <td className="py-1 px-2 text-neutral-500 max-w-[240px] truncate" title={t.comment}>
+                <td className="py-1 px-2 text-neutral-400 hidden sm:table-cell">{t.reason}</td>
+                <td className="py-1 px-2 text-neutral-500 max-w-[240px] truncate hidden sm:table-cell" title={t.comment}>
                   {t.comment}
                 </td>
               </tr>
             ))}
             {visible.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-4 text-center text-neutral-500">
+                <td colSpan={7} className="py-4 text-center text-neutral-500">
                   No trades match the current filter.
                 </td>
               </tr>

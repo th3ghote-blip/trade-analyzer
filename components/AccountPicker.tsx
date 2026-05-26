@@ -64,11 +64,11 @@ export default function AccountPicker(props: Props) {
 
   return (
     <section className="mb-6 border border-neutral-800 rounded bg-neutral-900/40 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-300">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-300 flex-1 min-w-fit">
           Saved accounts
         </h2>
-        <div className="flex gap-2 text-xs">
+        <div className="flex flex-wrap gap-2 text-xs">
           <button
             onClick={props.onNew}
             className="px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-700"
